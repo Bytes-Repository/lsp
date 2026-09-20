@@ -1,0 +1,528 @@
+pub fn byte_at(s: string, i: int) -> int is
+    if i < 0 is return -1 end
+    let c: string = string_at(s, i)
+    if c == "" is return -1 end
+    return __builtin_str_to_char_code(c)
+end
+
+pub fn skip_ws(s: string, i: int) -> int is
+    let mut p: int = i
+    while true is
+        let c: int = byte_at(s, p)
+        if c == 32 || c == 9 || c == 10 || c == 13 is
+            p += 1
+        else is
+            return p
+        end
+    end
+    return p
+end
+
+;; s[i] == '"'. Zwraca indeks tuz PO zamykajacym cudzyslowie albo -1.
+;; Skanuje kawalkami po 512 bajtow, zeby strlen() dotyczyl krotkiego bufora.
+pub fn string_end(s: string, i: int) -> int is
+    let mut p: int = i + 1
+    while true is
+        let chunk: string = string_slice(s, p, p + 512)
+        let cl: int = string_len(chunk)
+        if cl == 0 is return -1 end
+        let mut k: int = 0
+        while k < cl is
+            let c: int = byte_at(chunk, k)
+            if c == 34 is return p + k + 1 end
+            if c == 92 is
+                k += 2
+            else is
+                k += 1
+            end
+        end
+        p = p + k
+    end
+    return -1
+end
+
+;; Indeks tuz za wartoscia zaczynajaca sie w i (i wskazuje pierwszy znak wartosci).
+pub fn value_end(s: string, i: int) -> int is
+    let c: int = byte_at(s, i)
+    if c == -1 is return -1 end
+    if c == 34 is return string_end(s, i) end
+    if c == 123 || c == 91 is
+        let mut depth: int = 0
+        let mut p: int = i
+        while true is
+            let d: int = byte_at(s, p)
+            if d == -1 is return -1 end
+            if d == 34 is
+                let e: int = string_end(s, p)
+                if e < 0 is return -1 end
+                p = e
+                continue
+            end
+            if d == 123 || d == 91 is
+                depth += 1
+            else if d == 125 || d == 93 is
+                depth -= 1
+                if depth == 0 is return p + 1 end
+            end
+            p += 1
+        end
+    end
+    let mut q: int = i
+    while true is
+        let d: int = byte_at(s, q)
+        if d == -1 || d == 44 || d == 125 || d == 93 || d == 32 || d == 9 || d == 10 || d == 13 is
+            return q
+        end
+        q += 1
+    end
+    return q
+end
+
+fn key_matches(s: string, from: int, len: int, key: string) -> bool is
+    if string_len(key) != len is return false end
+    let mut k: int = 0
+    while k < len is
+        if byte_at(s, from + k) != byte_at(key, k) is return false end
+        k += 1
+    end
+    return true
+end
+
+;; s[i] == '{'. Indeks poczatku wartosci pola `key` albo -1.
+pub fn member_start(s: string, i: int, key: string) -> int is
+    if byte_at(s, i) != 123 is return -1 end
+    let mut j: int = skip_ws(s, i + 1)
+    while true is
+        let c: int = byte_at(s, j)
+        if c != 34 is return -1 end
+        let ke: int = string_end(s, j)
+        if ke < 0 is return -1 end
+        let matches: bool = key_matches(s, j + 1, ke - j - 2, key)
+        let mut v: int = skip_ws(s, ke)
+        if byte_at(s, v) != 58 is return -1 end
+        v = skip_ws(s, v + 1)
+        if matches is return v end
+        let ve: int = value_end(s, v)
+        if ve < 0 is return -1 end
+        j = skip_ws(s, ve)
+        if byte_at(s, j) == 44 is
+            j = skip_ws(s, j + 1)
+        else is
+            return -1
+        end
+    end
+    return -1
+end
+
+;; s[i] == '['. Indeks poczatku elementu `idx` albo -1.
+pub fn elem_start(s: string, i: int, idx: int) -> int is
+    if byte_at(s, i) != 91 is return -1 end
+    if idx < 0 is return -1 end
+    let mut j: int = skip_ws(s, i + 1)
+    let mut n: int = 0
+    while true is
+        let c: int = byte_at(s, j)
+        if c == -1 || c == 93 is return -1 end
+        if n == idx is return j end
+        let ve: int = value_end(s, j)
+        if ve < 0 is return -1 end
+        j = skip_ws(s, ve)
+        if byte_at(s, j) == 44 is
+            j = skip_ws(s, j + 1)
+            n += 1
+        else is
+            return -1
+        end
+    end
+    return -1
+end
+
+fn all_digits(s: string) -> bool is
+    let n: int = string_len(s)
+    if n == 0 is return false end
+    let mut i: int = 0
+    while i < n is
+        let c: int = byte_at(s, i)
+        if c < 48 || c > 57 is return false end
+        i += 1
+    end
+    return true
+end
+
+;; Indeks poczatku wartosci pod `path` (od pozycji 0 dokumentu) albo -1.
+pub fn locate(s: string, path: string) -> int is
+    let mut pos: int = skip_ws(s, 0)
+    if path == "" is
+        if pos >= 0 && byte_at(s, pos) != -1 is return pos end
+        return -1
+    end
+    let segs: [string] = string_split(path, ".")
+    let n: int = array_len(segs)
+    let mut i: int = 0
+    while i < n is
+        let seg: string = segs[i]
+        let c: int = byte_at(s, pos)
+        if c == 91 is
+            if !all_digits(seg) is return -1 end
+            pos = elem_start(s, pos, to_int(seg))
+        else if c == 123 is
+            pos = member_start(s, pos, seg)
+        else is
+            return -1
+        end
+        if pos < 0 is return -1 end
+        i += 1
+    end
+    return pos
+end
+
+;; ── Odczyt ────────────────────────────────────────────────────────────────────
+
+;; Surowy JSON wartosci pod sciezka ("" jesli brak).
+pub fn get(raw: string, path: string) -> string is
+    let st: int = locate(raw, path)
+    if st < 0 is return "" end
+    let en: int = value_end(raw, st)
+    if en < 0 is return "" end
+    return string_slice(raw, st, en)
+end
+
+pub fn has(raw: string, path: string) -> bool is
+    return locate(raw, path) >= 0
+end
+
+;; "object" | "array" | "string" | "number" | "bool" | "null" | ""
+pub fn kind(raw: string) -> string is
+    let p: int = skip_ws(raw, 0)
+    let c: int = byte_at(raw, p)
+    if c == 123 is return "object" end
+    if c == 91 is return "array" end
+    if c == 34 is return "string" end
+    if c == 116 || c == 102 is return "bool" end
+    if c == 110 is return "null" end
+    if c == 45 || (c >= 48 && c <= 57) is return "number" end
+    return ""
+end
+
+fn hex_val(c: int) -> int is
+    if c >= 48 && c <= 57 is return c - 48 end
+    if c >= 97 && c <= 102 is return c - 87 end
+    if c >= 65 && c <= 70 is return c - 55 end
+    return -1
+end
+
+fn hex4(s: string) -> int is
+    if string_len(s) < 4 is return -1 end
+    let mut v: int = 0
+    let mut i: int = 0
+    while i < 4 is
+        let h: int = hex_val(byte_at(s, i))
+        if h < 0 is return -1 end
+        v = v * 16 + h
+        i += 1
+    end
+    return v
+end
+
+;; Zamienia tresc stringa JSON (BEZ otaczajacych cudzyslowow) na zwykly tekst.
+;; Operacje hurtowe (replace/split w C) zamiast petli po znaku.
+pub fn unescape(raw: string) -> string is
+    if !string_contains(raw, "\\") is return raw end
+    let sent: string = "\x01\x02\x03"
+    let mut t: string = string_replace(raw, "\\\\", sent)
+    t = string_replace(t, "\\\"", "\"")
+    t = string_replace(t, "\\n", "\n")
+    t = string_replace(t, "\\r", "\r")
+    t = string_replace(t, "\\t", "\t")
+    t = string_replace(t, "\\/", "/")
+    t = string_replace(t, "\\b", "\x08")
+    t = string_replace(t, "\\f", "\x0c")
+    if string_contains(t, "\\u") is
+        let parts: [string] = string_split(t, "\\u")
+        let np: int = array_len(parts)
+        let mut out: [string] = [parts[0]]
+        let mut i: int = 1
+        while i < np is
+            let part: string = parts[i]
+            let code: int = hex4(part)
+            if code < 0 is
+                out = array_push(out, "\\u" + part)
+            else is
+                let mut rest: string = string_slice(part, 4, string_len(part))
+                let mut cp: int = code
+                if code >= 55296 && code <= 56319 && rest == "" && i + 1 < np is
+                    let lo: int = hex4(parts[i + 1])
+                    if lo >= 56320 && lo <= 57343 is
+                        cp = 65536 + (code - 55296) * 1024 + (lo - 56320)
+                        let nxt: string = parts[i + 1]
+                        rest = string_slice(nxt, 4, string_len(nxt))
+                        i += 1
+                    end
+                end
+                if cp > 0 is
+                    out = array_push(out, __builtin_char_code_to_str(cp))
+                end
+                out = array_push(out, rest)
+            end
+            i += 1
+        end
+        t = iter_join(out, "")
+    end
+    return string_replace(t, sent, "\\")
+end
+
+;; Dekoduje surowy string JSON (Z cudzyslowami) do zwyklego tekstu.
+pub fn to_str(raw: string) -> string is
+    let p: int = skip_ws(raw, 0)
+    if byte_at(raw, p) != 34 is return "" end
+    let e: int = string_end(raw, p)
+    if e < 0 is return "" end
+    return unescape(string_slice(raw, p + 1, e - 1))
+end
+
+pub fn get_str(raw: string, path: string) -> string is
+    let st: int = locate(raw, path)
+    if st < 0 is return "" end
+    if byte_at(raw, st) != 34 is return "" end
+    let e: int = string_end(raw, st)
+    if e < 0 is return "" end
+    return unescape(string_slice(raw, st + 1, e - 1))
+end
+
+;; Liczba calkowita z surowej wartosci (ulamek jest ucinany), 0 gdy to nie liczba.
+pub fn to_int(raw: string) -> int is
+    let mut p: int = skip_ws(raw, 0)
+    let mut neg: bool = false
+    if byte_at(raw, p) == 45 is
+        neg = true
+        p += 1
+    end
+    let mut v: int = 0
+    while true is
+        let c: int = byte_at(raw, p)
+        if c < 48 || c > 57 is break end
+        v = v * 10 + (c - 48)
+        p += 1
+    end
+    if neg is return 0 - v end
+    return v
+end
+
+pub fn get_int(raw: string, path: string) -> int is
+    let st: int = locate(raw, path)
+    if st < 0 is return 0 end
+    return to_int(string_slice(raw, st, st + 24))
+end
+
+pub fn to_bool(raw: string) -> bool is
+    let p: int = skip_ws(raw, 0)
+    return byte_at(raw, p) == 116
+end
+
+pub fn get_bool(raw: string, path: string) -> bool is
+    let st: int = locate(raw, path)
+    if st < 0 is return false end
+    return byte_at(raw, st) == 116
+end
+
+;; Liczba elementow tablicy / pol obiektu (0 dla reszty).
+pub fn count(raw: string) -> int is
+    let k: string = kind(raw)
+    if k == "array" is return array_len(items(raw)) end
+    if k == "object" is return array_len(keys(raw)) end
+    return 0
+end
+
+;; Surowe elementy tablicy.
+pub fn items(raw: string) -> [string] is
+    let mut out: [string] = []
+    let st: int = skip_ws(raw, 0)
+    if byte_at(raw, st) != 91 is return out end
+    let mut j: int = skip_ws(raw, st + 1)
+    while true is
+        let c: int = byte_at(raw, j)
+        if c == -1 || c == 93 is break end
+        let ve: int = value_end(raw, j)
+        if ve < 0 is break end
+        out = array_push(out, string_slice(raw, j, ve))
+        j = skip_ws(raw, ve)
+        if byte_at(raw, j) == 44 is
+            j = skip_ws(raw, j + 1)
+        else is
+            break
+        end
+    end
+    return out
+end
+
+pub fn item(raw: string, idx: int) -> string is
+    let st: int = skip_ws(raw, 0)
+    let p: int = elem_start(raw, st, idx)
+    if p < 0 is return "" end
+    let e: int = value_end(raw, p)
+    if e < 0 is return "" end
+    return string_slice(raw, p, e)
+end
+
+pub fn array_length(raw: string) -> int is
+    return array_len(items(raw))
+end
+
+;; Klucze obiektu (zdekodowane).
+pub fn keys(raw: string) -> [string] is
+    let mut out: [string] = []
+    let st: int = skip_ws(raw, 0)
+    if byte_at(raw, st) != 123 is return out end
+    let mut j: int = skip_ws(raw, st + 1)
+    while true is
+        if byte_at(raw, j) != 34 is break end
+        let ke: int = string_end(raw, j)
+        if ke < 0 is break end
+        out = array_push(out, unescape(string_slice(raw, j + 1, ke - 1)))
+        let mut v: int = skip_ws(raw, ke)
+        if byte_at(raw, v) != 58 is break end
+        v = skip_ws(raw, v + 1)
+        let ve: int = value_end(raw, v)
+        if ve < 0 is break end
+        j = skip_ws(raw, ve)
+        if byte_at(raw, j) == 44 is
+            j = skip_ws(raw, j + 1)
+        else is
+            break
+        end
+    end
+    return out
+end
+
+;; Czy caly tekst jest poprawna, pojedyncza wartoscia JSON (kontrola strukturalna).
+pub fn valid(raw: string) -> bool is
+    let st: int = skip_ws(raw, 0)
+    if byte_at(raw, st) == -1 is return false end
+    let e: int = value_end(raw, st)
+    if e < 0 is return false end
+    let k: int = kind(raw)
+    if k == "" is return false end
+    return byte_at(raw, skip_ws(raw, e)) == -1
+end
+
+;; ── Zapis / budowanie ─────────────────────────────────────────────────────────
+
+fn hex_digit(n: int) -> string is
+    let d: string = "0123456789abcdef"
+    return string_slice(d, n, n + 1)
+end
+
+;; Tekst -> string JSON z cudzyslowami. Znaki >= 0x80 przechodza bez zmian (UTF-8).
+pub fn quote(s: string) -> string is
+    let mut t: string = string_replace(s, "\\", "\\\\")
+    t = string_replace(t, "\"", "\\\"")
+    t = string_replace(t, "\n", "\\n")
+    t = string_replace(t, "\r", "\\r")
+    t = string_replace(t, "\t", "\\t")
+    let mut c: int = 1
+    while c < 32 is
+        if c != 9 && c != 10 && c != 13 is
+            let ch: string = __builtin_char_code_to_str(c)
+            if string_contains(t, ch) is
+                let esc: string = "\\u00" + hex_digit(c / 16) + hex_digit(c % 16)
+                t = string_replace(t, ch, esc)
+            end
+        end
+        c += 1
+    end
+    return "\"" + t + "\""
+end
+
+pub fn str(s: string) -> string is return quote(s) end
+pub fn num(n: int) -> string is return to_string(n) end
+pub fn boolean(b: bool) -> string is
+    if b is return "true" end
+    return "false"
+end
+pub fn null_value() -> string is return "null" end
+pub fn empty_object() -> string is return "{" + "}" end
+pub fn empty_array() -> string is return "[" + "]" end
+
+;; Tablica z surowych elementow: array(["1", "\"a\""]) -> [1,"a"]
+pub fn array(elems: [string]) -> string is
+    return "[" + iter_join(elems, ",") + "]"
+end
+
+pub fn array_of_strings(vals: [string]) -> string is
+    let mut q: [string] = []
+    let mut i: int = 0
+    while i < array_len(vals) is
+        q = array_push(q, quote(vals[i]))
+        i += 1
+    end
+    return array(q)
+end
+
+pub fn array_of_ints(vals: [int]) -> string is
+    let mut q: [string] = []
+    let mut i: int = 0
+    while i < array_len(vals) is
+        q = array_push(q, to_string(vals[i]))
+        i += 1
+    end
+    return array(q)
+end
+
+;; Obiekt z rownolegle podanych kluczy i surowych wartosci.
+pub fn object_of(ks: [string], vs: [string]) -> string is
+    let mut parts: [string] = []
+    let n: int = array_len(ks)
+    let mut i: int = 0
+    while i < n is
+        parts = array_push(parts, quote(ks[i]) + ":" + vs[i])
+        i += 1
+    end
+    return "{" + iter_join(parts, ",") + "}"
+end
+
+;; Wstawia lub podmienia pole `key` (surowa wartosc `value`) w obiekcie `obj`.
+pub fn put(obj: string, key: string, value: string) -> string is
+    let st: int = skip_ws(obj, 0)
+    if byte_at(obj, st) != 123 is
+        return "{" + quote(key) + ":" + value + "}"
+    end
+    let v: int = member_start(obj, st, key)
+    if v >= 0 is
+        let ve: int = value_end(obj, v)
+        if ve < 0 is return obj end
+        return string_slice(obj, 0, v) + value + string_slice(obj, ve, string_len(obj))
+    end
+    ;; append przed ostatnim '}'
+    let mut last: int = string_len(obj) - 1
+    while last > 0 && byte_at(obj, last) != 125 is last -= 1 end
+    if last <= st is return obj end
+    let head: string = string_slice(obj, 0, last)
+    let inner: int = skip_ws(obj, st + 1)
+    let empty: bool = inner >= last
+    let sep: string = if empty then "" else ","
+    return head + sep + quote(key) + ":" + value + "}"
+end
+
+pub fn put_str(obj: string, key: string, val: string) -> string is
+    return put(obj, key, quote(val))
+end
+
+pub fn put_int(obj: string, key: string, val: int) -> string is
+    return put(obj, key, to_string(val))
+end
+
+pub fn put_bool(obj: string, key: string, val: bool) -> string is
+    return put(obj, key, boolean(val))
+end
+
+;; Dopisuje surowy element na koniec tablicy.
+pub fn append(arr: string, value: string) -> string is
+    let st: int = skip_ws(arr, 0)
+    if byte_at(arr, st) != 91 is return "[" + value + "]" end
+    let mut last: int = string_len(arr) - 1
+    while last > 0 && byte_at(arr, last) != 93 is last -= 1 end
+    let head: string = string_slice(arr, 0, last)
+    let inner: int = skip_ws(arr, st + 1)
+    let sep: string = if inner >= last then "" else ","
+    return head + sep + value + "]"
+end
