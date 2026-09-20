@@ -1,0 +1,319 @@
+mod lsp_json
+
+;; ── Linie ─────────────────────────────────────────────────────────────────────
+
+pub fn split_lines(text: string) -> [string] is
+    return string_split(text, "\n")
+end
+
+pub fn join_lines(lines: [string]) -> string is
+    return iter_join(lines, "\n")
+end
+
+;; Ile bajtow UTF-8 zajmuje znak o danym bajcie wiodacym.
+pub fn utf8_len(lead: int) -> int is
+    if lead < 128 is return 1 end
+    if lead >= 240 is return 4 end
+    if lead >= 224 is return 3 end
+    if lead >= 192 is return 2 end
+    return 1
+end
+
+;; Kolumna (w jednostkach `enc`) -> przesuniecie bajtowe w linii. Kolumna za
+;; koncem linii daje dlugosc linii.
+pub fn col_to_byte(line: string, col: int, enc: int) -> int is
+    let n: int = string_len(line)
+    if enc == 8 is
+        if col > n is return n end
+        if col < 0 is return 0 end
+        return col
+    end
+    let mut i: int = 0
+    let mut units: int = 0
+    while i < n && units < col is
+        let l: int = utf8_len(lsp_json::byte_at(line, i))
+        if enc == 16 && l == 4 is
+            units += 2
+        else is
+            units += 1
+        end
+        i += l
+    end
+    if i > n is return n end
+    return i
+end
+
+;; Przesuniecie bajtowe -> kolumna w jednostkach `enc`.
+pub fn byte_to_col(line: string, off: int, enc: int) -> int is
+    if enc == 8 is return off end
+    let n: int = string_len(line)
+    let mut i: int = 0
+    let mut units: int = 0
+    while i < n && i < off is
+        let l: int = utf8_len(lsp_json::byte_at(line, i))
+        if enc == 16 && l == 4 is
+            units += 2
+        else is
+            units += 1
+        end
+        i += l
+    end
+    return units
+end
+
+;; Dlugosc linii w jednostkach `enc`.
+pub fn line_length(line: string, enc: int) -> int is
+    return byte_to_col(line, string_len(line), enc)
+end
+
+;; Bezwzgledne przesuniecie bajtowe (w tekscie zlozonym z linii sklejonych "\n")
+;; dla pozycji (line, col).
+pub fn offset_at(lines: [string], line: int, col: int, enc: int) -> int is
+    let n: int = array_len(lines)
+    let mut off: int = 0
+    let mut i: int = 0
+    while i < line && i < n is
+        off += string_len(lines[i]) + 1
+        i += 1
+    end
+    if line >= n is
+        if n == 0 is return 0 end
+        return off - 1
+    end
+    return off + col_to_byte(lines[line], col, enc)
+end
+
+;; Numer linii, w ktorej lezy bajt `off` (tekst sklejony "\n").
+pub fn line_of_offset(lines: [string], off: int) -> int is
+    let n: int = array_len(lines)
+    let mut acc: int = 0
+    let mut i: int = 0
+    while i < n is
+        let len: int = string_len(lines[i])
+        if off <= acc + len is return i end
+        acc += len + 1
+        i += 1
+    end
+    if n == 0 is return 0 end
+    return n - 1
+end
+
+;; Kolumna (jednostki `enc`) bajtu `off`.
+pub fn col_of_offset(lines: [string], off: int, enc: int) -> int is
+    let n: int = array_len(lines)
+    let mut acc: int = 0
+    let mut i: int = 0
+    while i < n is
+        let len: int = string_len(lines[i])
+        if off <= acc + len is
+            return byte_to_col(lines[i], off - acc, enc)
+        end
+        acc += len + 1
+        i += 1
+    end
+    return 0
+end
+
+;; ── Edycje ────────────────────────────────────────────────────────────────────
+
+fn lines_slice(lines: [string], from: int, to: int) -> [string] is
+    let mut out: [string] = []
+    let mut i: int = from
+    while i < to && i < array_len(lines) is
+        if i >= 0 is out = array_push(out, lines[i]) end
+        i += 1
+    end
+    return out
+end
+
+;; Zastepuje zakres (sl,sc)-(el,ec) tekstem `new_text` i zwraca nowa tablice linii.
+pub fn apply_edit(lines: [string], sl: int, sc: int, el: int, ec: int, new_text: string, enc: int) -> [string] is
+    let n: int = array_len(lines)
+    if n == 0 is return split_lines(new_text) end
+    let mut a: int = sl
+    let mut ac: int = sc
+    let mut b: int = el
+    let mut bc: int = ec
+    if a < 0 is
+        a = 0
+        ac = 0
+    end
+    if a >= n is
+        a = n - 1
+        ac = string_len(lines[n - 1]) + 1000000
+    end
+    if b >= n is
+        b = n - 1
+        bc = string_len(lines[n - 1]) + 1000000
+    end
+    if b < a is
+        b = a
+        bc = ac
+    end
+    let first: string = lines[a]
+    let last: string = lines[b]
+    let sb: int = col_to_byte(first, ac, enc)
+    let eb: int = col_to_byte(last, bc, enc)
+    let prefix: string = string_slice(first, 0, sb)
+    let suffix: string = string_slice(last, eb, string_len(last))
+    let mid: [string] = split_lines(new_text)
+    let mc: int = array_len(mid)
+    let mut out: [string] = lines_slice(lines, 0, a)
+    if mc == 1 is
+        out = array_push(out, prefix + mid[0] + suffix)
+    else is
+        out = array_push(out, prefix + mid[0])
+        let mut k: int = 1
+        while k < mc - 1 is
+            out = array_push(out, mid[k])
+            k += 1
+        end
+        out = array_push(out, mid[mc - 1] + suffix)
+    end
+    let mut r: int = b + 1
+    while r < n is
+        out = array_push(out, lines[r])
+        r += 1
+    end
+    return out
+end
+
+;; ── Slowa / identyfikatory ────────────────────────────────────────────────────
+
+;; Litera, cyfra, '_' albo bajt >= 0x80 (czesc znaku wielobajtowego).
+pub fn is_ident_byte(c: int) -> bool is
+    if c >= 48 && c <= 57 is return true end
+    if c >= 65 && c <= 90 is return true end
+    if c >= 97 && c <= 122 is return true end
+    return c == 95 || c >= 128
+end
+
+pub fn word_start(line: string, off: int) -> int is
+    let mut i: int = off
+    if i > string_len(line) is i = string_len(line) end
+    while i > 0 && is_ident_byte(lsp_json::byte_at(line, i - 1)) is
+        i -= 1
+    end
+    return i
+end
+
+pub fn word_end(line: string, off: int) -> int is
+    let n: int = string_len(line)
+    let mut i: int = off
+    while i < n && is_ident_byte(lsp_json::byte_at(line, i)) is
+        i += 1
+    end
+    return i
+end
+
+;; Identyfikator, w ktorym (lub tuz za ktorym) stoi kursor; "" gdy brak.
+pub fn word_at(line: string, off: int) -> string is
+    let s: int = word_start(line, off)
+    let e: int = word_end(line, off)
+    if e <= s is return "" end
+    return string_slice(line, s, e)
+end
+
+;; ── URI <-> sciezka ───────────────────────────────────────────────────────────
+
+fn hexv(c: int) -> int is
+    if c >= 48 && c <= 57 is return c - 48 end
+    if c >= 97 && c <= 102 is return c - 87 end
+    if c >= 65 && c <= 70 is return c - 55 end
+    return -1
+end
+
+fn decode_utf8_run(bs: [int]) -> string is
+    let n: int = array_len(bs)
+    let mut out: [string] = []
+    let mut j: int = 0
+    while j < n is
+        let b0: int = bs[j]
+        let l: int = utf8_len(b0)
+        if l == 1 || j + l > n is
+            out = array_push(out, __builtin_char_code_to_str(b0))
+            j += 1
+        else is
+            let mut cp: int = 0
+            if l == 2 is cp = b0 - 192 end
+            if l == 3 is cp = b0 - 224 end
+            if l == 4 is cp = b0 - 240 end
+            let mut k: int = 1
+            while k < l is
+                cp = cp * 64 + (bs[j + k] - 128)
+                k += 1
+            end
+            out = array_push(out, __builtin_char_code_to_str(cp))
+            j += l
+        end
+    end
+    return iter_join(out, "")
+end
+
+pub fn pct_decode(s: string) -> string is
+    if !string_contains(s, "%") is return s end
+    let n: int = string_len(s)
+    let mut out: [string] = []
+    let mut run: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: int = lsp_json::byte_at(s, i)
+        if c == 37 && hexv(lsp_json::byte_at(s, i + 1)) >= 0 && hexv(lsp_json::byte_at(s, i + 2)) >= 0 is
+            if i > run is out = array_push(out, string_slice(s, run, i)) end
+            let mut bs: [int] = []
+            while i + 2 < n && lsp_json::byte_at(s, i) == 37 && hexv(lsp_json::byte_at(s, i + 1)) >= 0 && hexv(lsp_json::byte_at(s, i + 2)) >= 0 is
+                bs = array_push(bs, hexv(lsp_json::byte_at(s, i + 1)) * 16 + hexv(lsp_json::byte_at(s, i + 2)))
+                i += 3
+            end
+            out = array_push(out, decode_utf8_run(bs))
+            run = i
+        else is
+            i += 1
+        end
+    end
+    if run < n is out = array_push(out, string_slice(s, run, n)) end
+    return iter_join(out, "")
+end
+
+fn is_unreserved(c: int) -> bool is
+    if c >= 48 && c <= 57 is return true end
+    if c >= 65 && c <= 90 is return true end
+    if c >= 97 && c <= 122 is return true end
+    return c == 45 || c == 46 || c == 95 || c == 126 || c == 47 || c == 58
+end
+
+pub fn pct_encode(s: string) -> string is
+    let n: int = string_len(s)
+    let hexd: string = "0123456789ABCDEF"
+    let mut out: [string] = []
+    let mut run: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: int = lsp_json::byte_at(s, i)
+        if !is_unreserved(c) is
+            if i > run is out = array_push(out, string_slice(s, run, i)) end
+            out = array_push(out, "%" + string_slice(hexd, c / 16, c / 16 + 1) + string_slice(hexd, c % 16, c % 16 + 1))
+            run = i + 1
+        end
+        i += 1
+    end
+    if run < n is out = array_push(out, string_slice(s, run, n)) end
+    return iter_join(out, "")
+end
+
+;; file:///home/u/a%20b.h# -> /home/u/a b.h#   (file:///C:/x -> C:/x). Inne
+;; schematy (untitled:, ...) zwracane bez zmian.
+pub fn uri_to_path(uri: string) -> string is
+    if !string_starts_with(uri, "file://") is return uri end
+    let mut rest: string = string_slice(uri, 7, string_len(uri))
+    if string_len(rest) > 2 && lsp_json::byte_at(rest, 0) == 47 && lsp_json::byte_at(rest, 2) == 58 is
+        rest = string_slice(rest, 1, string_len(rest))
+    end
+    return pct_decode(rest)
+end
+
+pub fn path_to_uri(path: string) -> string is
+    let enc: string = pct_encode(path)
+    if string_starts_with(enc, "/") is return "file://" + enc end
+    return "file:///" + enc
+end
