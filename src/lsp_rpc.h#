@@ -1,0 +1,132 @@
+mod lsp_json
+
+const LSP_ERR_PARSE: int = -32700
+const LSP_ERR_INVALID_REQUEST: int = -32600
+const LSP_ERR_METHOD_NOT_FOUND: int = -32601
+const LSP_ERR_INVALID_PARAMS: int = -32602
+const LSP_ERR_INTERNAL: int = -32603
+const LSP_ERR_NOT_INITIALIZED: int = -32002
+const LSP_ERR_UNKNOWN: int = -32001
+const LSP_ERR_REQUEST_FAILED: int = -32803
+const LSP_ERR_CANCELLED: int = -32800
+const LSP_ERR_CONTENT_MODIFIED: int = -32801
+
+;; ── Transport ─────────────────────────────────────────────────────────────────
+
+fn strip_cr(line: string) -> string is
+    let n: int = string_len(line)
+    if n > 0 && lsp_json::byte_at(line, n - 1) == 13 is
+        return string_slice(line, 0, n - 1)
+    end
+    return line
+end
+
+fn header_value(line: string, name_lower: string) -> string is
+    let colon: int = string_find(line, ":")
+    if colon < 0 is return "" end
+    let key: string = string_to_lower(string_slice(line, 0, colon))
+    if key != name_lower is return "" end
+    return string_trim(string_slice(line, colon + 1, string_len(line)))
+end
+
+;; Czyta jedna wiadomosc ze stdin i zwraca jej cialo (surowy JSON).
+;; Zwraca "" przy koncu strumienia (EOF) lub uszkodzonym naglowku.
+pub fn read_message() -> string is
+    let mut length: int = -1
+    let mut seen: int = 0
+    while true is
+        let raw: string = __builtin_io_read_line()
+        if raw == "" && seen == 0 is return "" end
+        seen += 1
+        let line: string = strip_cr(raw)
+        if line == "" is
+            if length >= 0 is break end
+            if raw == "" is return "" end
+            continue
+        end
+        let v: string = header_value(line, "content-length")
+        if v != "" is length = lsp_json::to_int(v) end
+    end
+    if length <= 0 is return "" end
+    let mut parts: [string] = []
+    let mut got: int = 0
+    while got < length is
+        let want: int = if length - got < 64 then length - got else 64
+        let mut chunk: string = ""
+        let mut k: int = 0
+        while k < want is
+            let c: string = __builtin_io_read_char()
+            if c == "" is
+                if chunk != "" is parts = array_push(parts, chunk) end
+                return ""
+            end
+            chunk = chunk + c
+            k += 1
+        end
+        parts = array_push(parts, chunk)
+        got += want
+    end
+    return iter_join(parts, "")
+end
+
+;; Wysyla surowy JSON jako wiadomosc LSP.
+pub fn send(body: string) is
+    let head: string = "Content-Length: " + to_string(string_len(body)) + "\r\n\r\n"
+    __builtin_io_write_no_nl(head + body)
+    __builtin_io_flush()
+end
+
+;; ── Budowanie wiadomosci ──────────────────────────────────────────────────────
+
+;; id_raw to surowy JSON identyfikatora (np. `7` albo `"abc"`); "" -> null.
+pub fn response(id_raw: string, result: string) -> string is
+    let id: string = if id_raw == "" then "null" else id_raw
+    let res: string = if result == "" then "null" else result
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":" + res + "}"
+end
+
+pub fn error_response(id_raw: string, code: int, message: string) -> string is
+    let id: string = if id_raw == "" then "null" else id_raw
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"error\":{\"code\":" + to_string(code) + ",\"message\":" + lsp_json::quote(message) + "}" + "}"
+end
+
+pub fn notification(method: string, params: string) -> string is
+    let p: string = if params == "" then "null" else params
+    return "{\"jsonrpc\":\"2.0\",\"method\":" + lsp_json::quote(method) + ",\"params\":" + p + "}"
+end
+
+pub fn request(id_raw: string, method: string, params: string) -> string is
+    let p: string = if params == "" then "null" else params
+    return "{\"jsonrpc\":\"2.0\",\"id\":" + id_raw + ",\"method\":" + lsp_json::quote(method) + ",\"params\":" + p + "}"
+end
+
+;; ── Klasyfikacja ──────────────────────────────────────────────────────────────
+
+pub fn msg_method(raw: string) -> string is return lsp_json::get_str(raw, "method") end
+pub fn msg_id(raw: string) -> string is return lsp_json::get(raw, "id") end
+pub fn msg_params(raw: string) -> string is return lsp_json::get(raw, "params") end
+
+;; Zadanie: ma method i id.
+pub fn is_request(raw: string) -> bool is
+    return lsp_json::has(raw, "method") && lsp_json::has(raw, "id")
+end
+
+;; Powiadomienie: ma method, nie ma id.
+pub fn is_notification(raw: string) -> bool is
+    return lsp_json::has(raw, "method") && !lsp_json::has(raw, "id")
+end
+
+;; Odpowiedz klienta na zadanie wyslane przez serwer.
+pub fn is_response(raw: string) -> bool is
+    return !lsp_json::has(raw, "method") && lsp_json::has(raw, "id")
+end
+
+;; ── Komunikaty dla uzytkownika ───────────────────────────────────────────────
+
+pub fn log_message(level: int, text: string) -> string is
+    return notification("window/logMessage", "{\"type\":" + to_string(level) + ",\"message\":" + lsp_json::quote(text) + "}")
+end
+
+pub fn show_message(level: int, text: string) -> string is
+    return notification("window/showMessage", "{\"type\":" + to_string(level) + ",\"message\":" + lsp_json::quote(text) + "}")
+end
