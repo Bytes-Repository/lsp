@@ -1,0 +1,174 @@
+mod lsp_json
+mod lsp_text
+
+pub struct Document is
+    pub d_uri: string
+    pub d_lang: string
+    pub d_version: int
+    pub d_lines: [string]
+end
+
+pub struct Store is
+    pub st_docs: [Document]
+end
+
+pub fn new_store() -> Store is
+    return Store { st_docs: [] }
+end
+
+pub fn count(st: Store) -> int is
+    return array_len(st.st_docs)
+end
+
+pub fn index_of(st: Store, uri: string) -> int is
+    let n: int = array_len(st.st_docs)
+    let mut i: int = 0
+    while i < n is
+        let d: Document = st.st_docs[i]
+        if d.d_uri == uri is return i end
+        i += 1
+    end
+    return -1
+end
+
+pub fn is_open(st: Store, uri: string) -> bool is
+    return index_of(st, uri) >= 0
+end
+
+fn replace_doc(st: Store, idx: int, doc: Document) -> Store is
+    let mut out: [Document] = []
+    let n: int = array_len(st.st_docs)
+    let mut i: int = 0
+    while i < n is
+        if i == idx is
+            out = array_push(out, doc)
+        else is
+            out = array_push(out, st.st_docs[i])
+        end
+        i += 1
+    end
+    return Store { st_docs: out }
+end
+
+;; Otwiera (lub nadpisuje) dokument z pelnego tekstu.
+pub fn open(st: Store, uri: string, lang: string, version: int, text: string) -> Store is
+    let doc: Document = Document { d_uri: uri, d_lang: lang, d_version: version, d_lines: lsp_text::split_lines(text) }
+    let idx: int = index_of(st, uri)
+    if idx >= 0 is return replace_doc(st, idx, doc) end
+    let mut out: [Document] = []
+    let n: int = array_len(st.st_docs)
+    let mut i: int = 0
+    while i < n is
+        out = array_push(out, st.st_docs[i])
+        i += 1
+    end
+    out = array_push(out, doc)
+    return Store { st_docs: out }
+end
+
+pub fn close(st: Store, uri: string) -> Store is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return st end
+    let mut out: [Document] = []
+    let n: int = array_len(st.st_docs)
+    let mut i: int = 0
+    while i < n is
+        if i != idx is out = array_push(out, st.st_docs[i]) end
+        i += 1
+    end
+    return Store { st_docs: out }
+end
+
+;; Podmienia tresc dokumentu (pelna synchronizacja).
+pub fn set_text(st: Store, uri: string, version: int, text: string) -> Store is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return open(st, uri, "", version, text) end
+    let old: Document = st.st_docs[idx]
+    let doc: Document = Document { d_uri: uri, d_lang: old.d_lang, d_version: version, d_lines: lsp_text::split_lines(text) }
+    return replace_doc(st, idx, doc)
+end
+
+;; Stosuje tablice `contentChanges` (surowy JSON) z textDocument/didChange.
+;; Zmiana z polem `range` jest inkrementalna, bez niego — pelna podmiana tekstu.
+pub fn apply_changes(st: Store, uri: string, version: int, changes: string, enc: int) -> Store is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return st end
+    let old: Document = st.st_docs[idx]
+    let mut lines: [string] = old.d_lines
+    let list: [string] = lsp_json::items(changes)
+    let n: int = array_len(list)
+    let mut i: int = 0
+    while i < n is
+        let ch: string = list[i]
+        let text: string = lsp_json::get_str(ch, "text")
+        if lsp_json::has(ch, "range") is
+            lines = lsp_text::apply_edit(lines,
+                lsp_json::get_int(ch, "range.start.line"), lsp_json::get_int(ch, "range.start.character"),
+                lsp_json::get_int(ch, "range.end.line"), lsp_json::get_int(ch, "range.end.character"),
+                text, enc)
+        else is
+            lines = lsp_text::split_lines(text)
+        end
+        i += 1
+    end
+    let doc: Document = Document { d_uri: uri, d_lang: old.d_lang, d_version: version, d_lines: lines }
+    return replace_doc(st, idx, doc)
+end
+
+;; ── Odczyt ────────────────────────────────────────────────────────────────────
+
+pub fn text(st: Store, uri: string) -> string is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return "" end
+    let d: Document = st.st_docs[idx]
+    return lsp_text::join_lines(d.d_lines)
+end
+
+pub fn lines(st: Store, uri: string) -> [string] is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return [] end
+    let d: Document = st.st_docs[idx]
+    return d.d_lines
+end
+
+pub fn line_count(st: Store, uri: string) -> int is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return 0 end
+    let d: Document = st.st_docs[idx]
+    return array_len(d.d_lines)
+end
+
+;; Linia `n` (od 0); "" poza zakresem.
+pub fn line(st: Store, uri: string, n: int) -> string is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return "" end
+    let d: Document = st.st_docs[idx]
+    if n < 0 || n >= array_len(d.d_lines) is return "" end
+    return d.d_lines[n]
+end
+
+pub fn version(st: Store, uri: string) -> int is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return -1 end
+    let d: Document = st.st_docs[idx]
+    return d.d_version
+end
+
+pub fn language(st: Store, uri: string) -> string is
+    let idx: int = index_of(st, uri)
+    if idx < 0 is return "" end
+    let d: Document = st.st_docs[idx]
+    return d.d_lang
+end
+
+pub fn uris(st: Store) -> [string] is
+    let mut out: [string] = []
+    let n: int = array_len(st.st_docs)
+    let mut i: int = 0
+    while i < n is
+        let d: Document = st.st_docs[i]
+        out = array_push(out, d.d_uri)
+        i += 1
+    end
+    return out
+end
