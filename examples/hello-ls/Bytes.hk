@@ -1,0 +1,11 @@
+[package]
+-> name    => hello-ls
+-> version => 0.1.0
+
+[build]
+-> lang   => h#
+-> entry  => src/main.h#
+-> output => build/hello-ls
+
+[deps]
+-> lsp
