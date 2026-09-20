@@ -1,0 +1,91 @@
+use "bytes -> lsp" from "lsp"
+
+fn keywords() -> [string] is
+    return ["let", "fn", "if", "else", "while", "for", "match", "return", "struct", "enum"]
+end
+
+;; Ostrzezenia "TODO" dla calego dokumentu.
+fn diagnose(srv: lsp::Server, doc_uri: string) is
+    let lines: [string] = lsp::lines(srv, doc_uri)
+    let mut diags: [string] = []
+    let mut i: int = 0
+    while i < array_len(lines) is
+        let col: int = string_find(lines[i], "TODO")
+        if col >= 0 is
+            let sc: int = lsp::text::byte_to_col(lines[i], col, lsp::encoding(srv))
+            let rng: string = lsp::proto::range(i, sc, i, sc + 4)
+            diags = array_push(diags, lsp::proto::diagnostic(rng, LSP_SEV_WARNING, "hello-ls", "Zostalo TODO"))
+        end
+        i += 1
+    end
+    lsp::publish_diagnostics(srv, doc_uri, diags)
+end
+
+fn completions(prefix_word: string) -> string is
+    let mut items: [string] = []
+    let kws: [string] = keywords()
+    let mut i: int = 0
+    while i < array_len(kws) is
+        if string_starts_with(kws[i], prefix_word) is
+            items = array_push(items, lsp::proto::completion_item(kws[i], LSP_KIND_KEYWORD, "slowo kluczowe"))
+        end
+        i += 1
+    end
+    return lsp::proto::completion_list(items, false)
+end
+
+fn symbols(srv: lsp::Server, doc_uri: string) -> string is
+    let lines: [string] = lsp::lines(srv, doc_uri)
+    let mut out: [string] = []
+    let mut i: int = 0
+    while i < array_len(lines) is
+        if string_starts_with(lines[i], "fn ") is
+            let name: string = lsp::text::word_at(lines[i], 3)
+            let rng: string = lsp::proto::range(i, 0, i, string_len(lines[i]))
+            let sel: string = lsp::proto::range(i, 3, i, 3 + string_len(name))
+            out = array_push(out, lsp::proto::document_symbol(name, "", LSP_SYM_FUNCTION, rng, sel, "[]"))
+        end
+        i += 1
+    end
+    return lsp::json::array(out)
+end
+
+fn main() is
+    let mut srv: lsp::Server = lsp::new_server("hello-ls", "0.1.0")
+    srv = lsp::enable(srv, "hoverProvider")
+    srv = lsp::enable(srv, "documentSymbolProvider")
+    srv = lsp::set_capability(srv, "completionProvider", lsp::proto::completion_options([], false))
+
+    while !lsp::finished(srv) is
+        srv = lsp::next(srv)
+        match lsp::method(srv) is
+            "initialized" => is
+                lsp::log_info(srv, "hello-ls gotowy")
+            end
+            "textDocument/didOpen" | "textDocument/didChange" => is
+                diagnose(srv, lsp::uri(srv))
+            end
+            "textDocument/didClose" => is
+                lsp::clear_diagnostics(srv, lsp::uri(srv))
+            end
+            "textDocument/hover" => is
+                let word: string = lsp::cursor_word(srv)
+                if word == "" is
+                    lsp::reply(srv, "null")
+                else is
+                    let h: string = lsp::proto::hover_range("**" + word + "**", lsp::cursor_word_range(srv))
+                    lsp::reply(srv, h)
+                end
+            end
+            "textDocument/completion" => is
+                lsp::reply(srv, completions(lsp::text::word_at(lsp::cursor_prefix(srv), string_len(lsp::cursor_prefix(srv)))))
+            end
+            "textDocument/documentSymbol" => is
+                lsp::reply(srv, symbols(srv, lsp::uri(srv)))
+            end
+            "" => is end
+            _ => is srv = lsp::unhandled(srv) end
+        end
+    end
+    exit(lsp::exit_code(srv))
+end
