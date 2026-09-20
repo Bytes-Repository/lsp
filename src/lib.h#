@@ -1,1 +1,303 @@
+mod lsp_json
+mod lsp_text
+mod lsp_proto
+mod lsp_rpc
+mod lsp_docs
 
+pub struct Server is
+    pub s_name: string
+    pub s_version: string
+    pub s_caps: string
+    pub s_enc: int
+    pub s_want_utf8: bool
+    pub s_docs: lsp_docs::Store
+    pub s_msg: string
+    pub s_method: string
+    pub s_id: string
+    pub s_params: string
+    pub s_state: int
+    pub s_exit: int
+    pub s_root: string
+    pub s_client: string
+    pub s_init: string
+    pub s_next_id: int
+end
+
+;; ── Konstrukcja i konfiguracja ────────────────────────────────────────────────
+
+;; Nowy serwer. Domyslnie: synchronizacja inkrementalna, pozycje w UTF-16.
+pub fn new_server(name: string, version: string) -> Server is
+    return Server {
+        s_name: name, s_version: version,
+        s_caps: "{\"textDocumentSync\":{\"openClose\":true,\"change\":2}}",
+        s_enc: 16, s_want_utf8: false,
+        s_docs: lsp_docs::new_store(),
+        s_msg: "", s_method: "", s_id: "", s_params: "",
+        s_state: 0, s_exit: 0, s_root: "", s_client: "", s_init: "",
+        s_next_id: 1
+    }
+end
+
+;; Dowolna zdolnosc serwera: set_capability(srv, "hoverProvider", "true").
+pub fn set_capability(srv: Server, key: string, raw_value: string) -> Server is
+    let mut s: Server = srv
+    s.s_caps = lsp_json::put(s.s_caps, key, raw_value)
+    return s
+end
+
+;; Wlacza zdolnosc typu boolean: enable(srv, "definitionProvider").
+pub fn enable(srv: Server, key: string) -> Server is
+    return set_capability(srv, key, "true")
+end
+
+;; 0 = brak, 1 = pelna (caly plik przy kazdej zmianie), 2 = inkrementalna.
+pub fn set_sync(srv: Server, kind: int) -> Server is
+    return set_capability(srv, "textDocumentSync", "{\"openClose\":true,\"change\":" + to_string(kind) + "}")
+end
+
+;; Jesli klient to obsluguje, negocjuje pozycje w bajtach UTF-8 (szybsze i prostsze).
+pub fn prefer_utf8(srv: Server) -> Server is
+    let mut s: Server = srv
+    s.s_want_utf8 = true
+    return s
+end
+
+;; ── Petla ─────────────────────────────────────────────────────────────────────
+
+pub fn finished(srv: Server) -> bool is
+    return srv.s_state == 3
+end
+
+;; Kod wyjscia dla exit(): 0 gdy klient wyslal shutdown przed exit, inaczej 1.
+pub fn exit_code(srv: Server) -> int is
+    return srv.s_exit
+end
+
+fn send_raw(body: string) is
+    lsp_rpc::send(body)
+end
+
+fn handle_initialize(srv: Server) -> Server is
+    let mut s: Server = srv
+    s.s_init = s.s_params
+    s.s_client = lsp_json::get(s.s_params, "capabilities")
+    let mut root: string = lsp_json::get_str(s.s_params, "rootUri")
+    if root == "" is root = lsp_json::get_str(s.s_params, "workspaceFolders.0.uri") end
+    s.s_root = root
+    let encs: string = lsp_json::get(s.s_params, "capabilities.general.positionEncodings")
+    if s.s_want_utf8 && string_contains(encs, "\"utf-8\"") is
+        s.s_enc = 8
+        s.s_caps = lsp_json::put(s.s_caps, "positionEncoding", "\"utf-8\"")
+    end
+    let info: string = "{\"name\":" + lsp_json::quote(s.s_name) + ",\"version\":" + lsp_json::quote(s.s_version) + "}"
+    let result: string = "{\"capabilities\":" + s.s_caps + ",\"serverInfo\":" + info + "}"
+    send_raw(lsp_rpc::response(s.s_id, result))
+    s.s_state = 1
+    return s
+end
+
+;; Czyta kolejna wiadomosc. Obsluguje sama: initialize, shutdown, $/cancelRequest,
+;; $/setTrace oraz bledy protokolu. Dla didOpen/didChange/didClose najpierw
+;; aktualizuje magazyn dokumentow, potem oddaje wiadomosc tobie. Na koncu
+;; strumienia (EOF) ustawia stan "zakonczony" i method == "".
+pub fn next(srv: Server) -> Server is
+    let mut s: Server = srv
+    while true is
+        let raw: string = lsp_rpc::read_message()
+        if raw == "" is
+            if s.s_state == 2 is
+                s.s_exit = 0
+            else is
+                s.s_exit = 1
+            end
+            s.s_state = 3
+            s.s_msg = ""
+            s.s_method = ""
+            s.s_id = ""
+            s.s_params = ""
+            return s
+        end
+        if !lsp_json::valid(raw) is
+            send_raw(lsp_rpc::error_response("", LSP_ERR_PARSE, "Parse error"))
+            continue
+        end
+        s.s_msg = raw
+        s.s_method = lsp_json::get_str(raw, "method")
+        s.s_id = lsp_json::get(raw, "id")
+        s.s_params = lsp_json::get(raw, "params")
+        let is_req: bool = s.s_method != "" && s.s_id != ""
+        let m: string = s.s_method
+
+        if s.s_method == "" is return s end
+
+        if m == "exit" is
+            if s.s_state == 2 is
+                s.s_exit = 0
+            else is
+                s.s_exit = 1
+            end
+            s.s_state = 3
+            return s
+        end
+        if m == "initialize" is
+            if s.s_state == 0 is
+                s = handle_initialize(s)
+            else is
+                send_raw(lsp_rpc::error_response(s.s_id, LSP_ERR_INVALID_REQUEST, "Server already initialized"))
+            end
+            continue
+        end
+        if s.s_state == 0 is
+            if is_req is
+                send_raw(lsp_rpc::error_response(s.s_id, LSP_ERR_NOT_INITIALIZED, "Server not initialized"))
+            end
+            continue
+        end
+        if m == "shutdown" is
+            send_raw(lsp_rpc::response(s.s_id, "null"))
+            s.s_state = 2
+            continue
+        end
+        if s.s_state == 2 is
+            if is_req is
+                send_raw(lsp_rpc::error_response(s.s_id, LSP_ERR_INVALID_REQUEST, "Server is shutting down"))
+            end
+            continue
+        end
+        if m == "$/cancelRequest" || m == "$/setTrace" || m == "$/progress" is continue end
+
+        if m == "textDocument/didOpen" is
+            s.s_docs = lsp_docs::open(s.s_docs,
+                lsp_json::get_str(s.s_params, "textDocument.uri"),
+                lsp_json::get_str(s.s_params, "textDocument.languageId"),
+                lsp_json::get_int(s.s_params, "textDocument.version"),
+                lsp_json::get_str(s.s_params, "textDocument.text"))
+        else if m == "textDocument/didChange" is
+            s.s_docs = lsp_docs::apply_changes(s.s_docs,
+                lsp_json::get_str(s.s_params, "textDocument.uri"),
+                lsp_json::get_int(s.s_params, "textDocument.version"),
+                lsp_json::get(s.s_params, "contentChanges"), s.s_enc)
+        else if m == "textDocument/didClose" is
+            s.s_docs = lsp_docs::close(s.s_docs, lsp_json::get_str(s.s_params, "textDocument.uri"))
+        end
+        return s
+    end
+    return s
+end
+
+;; Odpowiedz na nieobsluzona wiadomosc: MethodNotFound dla zadan, nic dla powiadomien.
+pub fn unhandled(srv: Server) -> Server is
+    if srv.s_method != "" && srv.s_id != "" is
+        send_raw(lsp_rpc::error_response(srv.s_id, LSP_ERR_METHOD_NOT_FOUND, "Method not found: " + srv.s_method))
+    end
+    return srv
+end
+
+;; ── Biezaca wiadomosc ─────────────────────────────────────────────────────────
+
+pub fn method(srv: Server) -> string is return srv.s_method end
+pub fn raw(srv: Server) -> string is return srv.s_msg end
+pub fn id(srv: Server) -> string is return srv.s_id end
+pub fn params(srv: Server) -> string is return srv.s_params end
+pub fn is_request(srv: Server) -> bool is return srv.s_method != "" && srv.s_id != "" end
+pub fn is_notification(srv: Server) -> bool is return srv.s_method != "" && srv.s_id == "" end
+;; Odpowiedz klienta na zadanie serwera (method == "").
+pub fn is_response(srv: Server) -> bool is return srv.s_method == "" && srv.s_id != "" end
+
+pub fn param(srv: Server, path: string) -> string is return lsp_json::get(srv.s_params, path) end
+pub fn param_str(srv: Server, path: string) -> string is return lsp_json::get_str(srv.s_params, path) end
+pub fn param_int(srv: Server, path: string) -> int is return lsp_json::get_int(srv.s_params, path) end
+pub fn param_bool(srv: Server, path: string) -> bool is return lsp_json::get_bool(srv.s_params, path) end
+
+;; textDocument.uri biezacej wiadomosci.
+pub fn uri(srv: Server) -> string is return lsp_json::get_str(srv.s_params, "textDocument.uri") end
+;; position.line / position.character biezacej wiadomosci.
+pub fn pos_line(srv: Server) -> int is return lsp_json::get_int(srv.s_params, "position.line") end
+pub fn pos_char(srv: Server) -> int is return lsp_json::get_int(srv.s_params, "position.character") end
+
+pub fn root_uri(srv: Server) -> string is return srv.s_root end
+pub fn root_path(srv: Server) -> string is return lsp_text::uri_to_path(srv.s_root) end
+pub fn client_capabilities(srv: Server) -> string is return srv.s_client end
+pub fn initialize_params(srv: Server) -> string is return srv.s_init end
+;; 16, 8 lub 32 — jednostka kolumn w pozycjach LSP.
+pub fn encoding(srv: Server) -> int is return srv.s_enc end
+pub fn docs(srv: Server) -> lsp_docs::Store is return srv.s_docs end
+
+;; ── Dokumenty ─────────────────────────────────────────────────────────────────
+
+pub fn text(srv: Server, uri: string) -> string is return lsp_docs::text(srv.s_docs, uri) end
+pub fn lines(srv: Server, uri: string) -> [string] is return lsp_docs::lines(srv.s_docs, uri) end
+pub fn doc_line(srv: Server, uri: string, n: int) -> string is return lsp_docs::line(srv.s_docs, uri, n) end
+pub fn is_open(srv: Server, uri: string) -> bool is return lsp_docs::is_open(srv.s_docs, uri) end
+pub fn open_uris(srv: Server) -> [string] is return lsp_docs::uris(srv.s_docs) end
+
+;; Linia pod kursorem biezacego zadania (textDocument + position).
+pub fn cursor_line(srv: Server) -> string is
+    return lsp_docs::line(srv.s_docs, uri(srv), pos_line(srv))
+end
+
+;; Przesuniecie bajtowe kursora w jego linii.
+pub fn cursor_byte(srv: Server) -> int is
+    return lsp_text::col_to_byte(cursor_line(srv), pos_char(srv), srv.s_enc)
+end
+
+;; Tekst linii przed kursorem — przydatne do uzupelniania.
+pub fn cursor_prefix(srv: Server) -> string is
+    return string_slice(cursor_line(srv), 0, cursor_byte(srv))
+end
+
+;; Identyfikator pod kursorem ("" gdy brak).
+pub fn cursor_word(srv: Server) -> string is
+    return lsp_text::word_at(cursor_line(srv), cursor_byte(srv))
+end
+
+;; Zakres LSP identyfikatora pod kursorem (w jednostkach kodowania serwera).
+pub fn cursor_word_range(srv: Server) -> string is
+    let ln: string = cursor_line(srv)
+    let b: int = cursor_byte(srv)
+    let sc: int = lsp_text::byte_to_col(ln, lsp_text::word_start(ln, b), srv.s_enc)
+    let ec: int = lsp_text::byte_to_col(ln, lsp_text::word_end(ln, b), srv.s_enc)
+    return lsp_proto::range(pos_line(srv), sc, pos_line(srv), ec)
+end
+
+;; ── Wysylanie ─────────────────────────────────────────────────────────────────
+
+;; Odpowiedz na biezace zadanie (result = surowy JSON, "" -> null).
+pub fn reply(srv: Server, result: string) is
+    send_raw(lsp_rpc::response(srv.s_id, result))
+end
+
+pub fn reply_error(srv: Server, code: int, message: string) is
+    send_raw(lsp_rpc::error_response(srv.s_id, code, message))
+end
+
+pub fn notify(srv: Server, method_name: string, params_raw: string) is
+    send_raw(lsp_rpc::notification(method_name, params_raw))
+end
+
+;; Zadanie serwer -> klient (np. workspace/configuration). Odpowiedz przyjdzie
+;; z next() jako is_response(srv). Zwraca serwer z podbitym licznikiem id.
+pub fn request(srv: Server, method_name: string, params_raw: string) -> Server is
+    let mut s: Server = srv
+    send_raw(lsp_rpc::request(to_string(s.s_next_id), method_name, params_raw))
+    s.s_next_id += 1
+    return s
+end
+
+pub fn publish_diagnostics(srv: Server, doc_uri: string, diags: [string]) is
+    notify(srv, "textDocument/publishDiagnostics", lsp_proto::publish_diagnostics_params(doc_uri, diags))
+end
+
+pub fn clear_diagnostics(srv: Server, doc_uri: string) is
+    notify(srv, "textDocument/publishDiagnostics", lsp_proto::publish_diagnostics_params(doc_uri, []))
+end
+
+;; Log widoczny w panelu Output klienta (stdout jest zarezerwowany dla protokolu).
+pub fn log_info(srv: Server, msg: string) is send_raw(lsp_rpc::log_message(LSP_MSG_INFO, msg)) end
+pub fn log_warn(srv: Server, msg: string) is send_raw(lsp_rpc::log_message(LSP_MSG_WARNING, msg)) end
+pub fn log_error(srv: Server, msg: string) is send_raw(lsp_rpc::log_message(LSP_MSG_ERROR, msg)) end
+
+;; Okienko z komunikatem dla uzytkownika.
+pub fn show_info(srv: Server, msg: string) is send_raw(lsp_rpc::show_message(LSP_MSG_INFO, msg)) end
+pub fn show_warn(srv: Server, msg: string) is send_raw(lsp_rpc::show_message(LSP_MSG_WARNING, msg)) end
+pub fn show_error(srv: Server, msg: string) is send_raw(lsp_rpc::show_message(LSP_MSG_ERROR, msg)) end
