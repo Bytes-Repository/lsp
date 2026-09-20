@@ -1,1 +1,12 @@
+[package]
+-> name        => lsp
+-> version     => 0.1.0
+-> description => Biblioteka do pisania serwerow LSP (Language Server Protocol) w H#
+-> author      => Bytes Developers
+-> license     => MIT
 
+[build]
+-> lang   => h#
+-> entry  => src/lib.h#
+-> output => build/liblsp
+-> emit   => lib
