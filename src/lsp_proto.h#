@@ -1,0 +1,202 @@
+mod lsp_json
+
+;; ── Stale (nie sa prefiksowane przez kompilator — dlatego LSP_...) ───────────
+const LSP_SEV_ERROR: int = 1
+const LSP_SEV_WARNING: int = 2
+const LSP_SEV_INFO: int = 3
+const LSP_SEV_HINT: int = 4
+
+const LSP_SYNC_NONE: int = 0
+const LSP_SYNC_FULL: int = 1
+const LSP_SYNC_INCREMENTAL: int = 2
+
+const LSP_KIND_TEXT: int = 1
+const LSP_KIND_METHOD: int = 2
+const LSP_KIND_FUNCTION: int = 3
+const LSP_KIND_CONSTRUCTOR: int = 4
+const LSP_KIND_FIELD: int = 5
+const LSP_KIND_VARIABLE: int = 6
+const LSP_KIND_CLASS: int = 7
+const LSP_KIND_INTERFACE: int = 8
+const LSP_KIND_MODULE: int = 9
+const LSP_KIND_PROPERTY: int = 10
+const LSP_KIND_UNIT: int = 11
+const LSP_KIND_VALUE: int = 12
+const LSP_KIND_ENUM: int = 13
+const LSP_KIND_KEYWORD: int = 14
+const LSP_KIND_SNIPPET: int = 15
+const LSP_KIND_COLOR: int = 16
+const LSP_KIND_FILE: int = 17
+const LSP_KIND_REFERENCE: int = 18
+const LSP_KIND_FOLDER: int = 19
+const LSP_KIND_ENUM_MEMBER: int = 20
+const LSP_KIND_CONSTANT: int = 21
+const LSP_KIND_STRUCT: int = 22
+const LSP_KIND_EVENT: int = 23
+const LSP_KIND_OPERATOR: int = 24
+const LSP_KIND_TYPE_PARAMETER: int = 25
+
+;; SymbolKind (rozne od CompletionItemKind od 12 wzwyz)
+const LSP_SYM_FILE: int = 1
+const LSP_SYM_MODULE: int = 2
+const LSP_SYM_NAMESPACE: int = 3
+const LSP_SYM_CLASS: int = 5
+const LSP_SYM_METHOD: int = 6
+const LSP_SYM_PROPERTY: int = 7
+const LSP_SYM_FIELD: int = 8
+const LSP_SYM_CONSTRUCTOR: int = 9
+const LSP_SYM_ENUM: int = 10
+const LSP_SYM_INTERFACE: int = 11
+const LSP_SYM_FUNCTION: int = 12
+const LSP_SYM_VARIABLE: int = 13
+const LSP_SYM_CONSTANT: int = 14
+const LSP_SYM_STRING: int = 15
+const LSP_SYM_NUMBER: int = 16
+const LSP_SYM_BOOLEAN: int = 17
+const LSP_SYM_ARRAY: int = 18
+const LSP_SYM_STRUCT: int = 23
+
+const LSP_MSG_ERROR: int = 1
+const LSP_MSG_WARNING: int = 2
+const LSP_MSG_INFO: int = 3
+const LSP_MSG_LOG: int = 4
+
+;; ── Podstawowe typy ───────────────────────────────────────────────────────────
+
+pub fn position(line: int, character: int) -> string is
+    return "{\"line\":" + to_string(line) + ",\"character\":" + to_string(character) + "}"
+end
+
+pub fn range(sl: int, sc: int, el: int, ec: int) -> string is
+    return "{\"start\":" + position(sl, sc) + ",\"end\":" + position(el, ec) + "}"
+end
+
+pub fn location(uri: string, rng: string) -> string is
+    return "{\"uri\":" + lsp_json::quote(uri) + ",\"range\":" + rng + "}"
+end
+
+pub fn text_edit(rng: string, new_text: string) -> string is
+    return "{\"range\":" + rng + ",\"newText\":" + lsp_json::quote(new_text) + "}"
+end
+
+pub fn markup(kind: string, value: string) -> string is
+    return "{\"kind\":" + lsp_json::quote(kind) + ",\"value\":" + lsp_json::quote(value) + "}"
+end
+
+pub fn markdown(value: string) -> string is return markup("markdown", value) end
+pub fn plaintext(value: string) -> string is return markup("plaintext", value) end
+
+;; ── Diagnostyki ───────────────────────────────────────────────────────────────
+
+pub fn diagnostic(rng: string, severity: int, source: string, message: string) -> string is
+    return "{\"range\":" + rng + ",\"severity\":" + to_string(severity) + ",\"source\":" + lsp_json::quote(source) + ",\"message\":" + lsp_json::quote(message) + "}"
+end
+
+pub fn diagnostic_code(rng: string, severity: int, code: string, source: string, message: string) -> string is
+    let base: string = diagnostic(rng, severity, source, message)
+    return lsp_json::put(base, "code", lsp_json::quote(code))
+end
+
+;; Parametry powiadomienia textDocument/publishDiagnostics.
+pub fn publish_diagnostics_params(uri: string, diags: [string]) -> string is
+    return "{\"uri\":" + lsp_json::quote(uri) + ",\"diagnostics\":" + lsp_json::array(diags) + "}"
+end
+
+;; ── Hover / uzupelnianie / sygnatury ──────────────────────────────────────────
+
+pub fn hover(markdown_text: string) -> string is
+    return "{\"contents\":" + markdown(markdown_text) + "}"
+end
+
+pub fn hover_range(markdown_text: string, rng: string) -> string is
+    return "{\"contents\":" + markdown(markdown_text) + ",\"range\":" + rng + "}"
+end
+
+pub fn completion_item(label: string, kind: int, detail: string) -> string is
+    return "{\"label\":" + lsp_json::quote(label) + ",\"kind\":" + to_string(kind) + ",\"detail\":" + lsp_json::quote(detail) + "}"
+end
+
+;; Element z wstawianym tekstem (insertText); `snippet` = true -> skladnia snippetow ($1, ${1:x}).
+pub fn completion_insert(label: string, kind: int, detail: string, insert_text: string, snippet: bool) -> string is
+    let mut it: string = completion_item(label, kind, detail)
+    it = lsp_json::put_str(it, "insertText", insert_text)
+    if snippet is
+        it = lsp_json::put_int(it, "insertTextFormat", 2)
+    end
+    return it
+end
+
+pub fn completion_doc(item: string, doc_markdown: string) -> string is
+    return lsp_json::put(item, "documentation", markdown(doc_markdown))
+end
+
+pub fn completion_list(items: [string], incomplete: bool) -> string is
+    return "{\"isIncomplete\":" + lsp_json::boolean(incomplete) + ",\"items\":" + lsp_json::array(items) + "}"
+end
+
+pub fn parameter(label: string, doc: string) -> string is
+    return "{\"label\":" + lsp_json::quote(label) + ",\"documentation\":" + lsp_json::quote(doc) + "}"
+end
+
+pub fn signature(label: string, doc: string, params: [string]) -> string is
+    return "{\"label\":" + lsp_json::quote(label) + ",\"documentation\":" + lsp_json::quote(doc) + ",\"parameters\":" + lsp_json::array(params) + "}"
+end
+
+pub fn signature_help(sigs: [string], active_sig: int, active_param: int) -> string is
+    return "{\"signatures\":" + lsp_json::array(sigs) + ",\"activeSignature\":" + to_string(active_sig) + ",\"activeParameter\":" + to_string(active_param) + "}"
+end
+
+;; ── Symbole ───────────────────────────────────────────────────────────────────
+
+;; DocumentSymbol; `children` = surowa tablica JSON ("[]" gdy brak).
+pub fn document_symbol(name: string, detail: string, kind: int, rng: string, sel: string, children: string) -> string is
+    return "{\"name\":" + lsp_json::quote(name) + ",\"detail\":" + lsp_json::quote(detail) + ",\"kind\":" + to_string(kind) + ",\"range\":" + rng + ",\"selectionRange\":" + sel + ",\"children\":" + children + "}"
+end
+
+pub fn symbol_information(name: string, kind: int, loc: string) -> string is
+    return "{\"name\":" + lsp_json::quote(name) + ",\"kind\":" + to_string(kind) + ",\"location\":" + loc + "}"
+end
+
+;; ── Edycje / akcje ────────────────────────────────────────────────────────────
+
+;; WorkspaceEdit zmieniajacy jeden dokument.
+pub fn workspace_edit(uri: string, edits: [string]) -> string is
+    return "{\"changes\":{" + lsp_json::quote(uri) + ":" + lsp_json::array(edits) + "}" + "}"
+end
+
+pub fn command(title: string, cmd: string) -> string is
+    return "{\"title\":" + lsp_json::quote(title) + ",\"command\":" + lsp_json::quote(cmd) + "}"
+end
+
+;; Kind: "quickfix", "refactor", "source.organizeImports", ...
+pub fn code_action(title: string, kind: string, edit: string) -> string is
+    return "{\"title\":" + lsp_json::quote(title) + ",\"kind\":" + lsp_json::quote(kind) + ",\"edit\":" + edit + "}"
+end
+
+pub fn folding_range(start_line: int, end_line: int) -> string is
+    return "{\"startLine\":" + to_string(start_line) + ",\"endLine\":" + to_string(end_line) + "}"
+end
+
+;; Semantic tokens: `data` to plaska tablica pieciokrotek
+;; (deltaLine, deltaStart, length, tokenType, modifiers).
+pub fn semantic_tokens(data: [int]) -> string is
+    return "{\"data\":" + lsp_json::array_of_ints(data) + "}"
+end
+
+;; ── Capabilities ──────────────────────────────────────────────────────────────
+
+pub fn completion_options(triggers: [string], resolve: bool) -> string is
+    return "{\"triggerCharacters\":" + lsp_json::array_of_strings(triggers) + ",\"resolveProvider\":" + lsp_json::boolean(resolve) + "}"
+end
+
+pub fn signature_help_options(triggers: [string]) -> string is
+    return "{\"triggerCharacters\":" + lsp_json::array_of_strings(triggers) + "}"
+end
+
+pub fn rename_options(prepare: bool) -> string is
+    return "{\"prepareProvider\":" + lsp_json::boolean(prepare) + "}"
+end
+
+pub fn semantic_tokens_options(types: [string], modifiers: [string]) -> string is
+    return "{\"legend\":{\"tokenTypes\":" + lsp_json::array_of_strings(types) + ",\"tokenModifiers\":" + lsp_json::array_of_strings(modifiers) + "},\"full\":true}"
+end
