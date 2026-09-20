@@ -1,0 +1,170 @@
+use "std -> test" from "test"
+
+mod lsp_json
+mod lsp_text
+mod lsp_proto
+mod lsp_rpc
+mod lsp_docs
+
+;; ── JSON ──────────────────────────────────────────────────────────────────────
+
+fn sample() -> string is
+    return "{\"id\":7,\"method\":\"m/x\",\"params\":{\"uri\":\"file:///a b\",\"items\":[{\"n\":1},{\"n\":2,\"t\":\"a\\\"b\\n\"}],\"ok\":true,\"nil\":null}}"
+end
+
+#[test]
+fn json_get_nested_and_index() is
+    test::assert_eq(lsp_json::get_int(sample(), "id"), 7)
+    test::assert_eq(lsp_json::get_str(sample(), "params.uri"), "file:///a b")
+    test::assert_eq(lsp_json::get_int(sample(), "params.items.1.n"), 2)
+    test::assert_eq(lsp_json::get(sample(), "params.items.0"), "{\"n\":1}")
+end
+
+#[test]
+fn json_decodes_escapes() is
+    test::assert_eq(lsp_json::get_str(sample(), "params.items.1.t"), "a\"b\n")
+    test::assert_eq(lsp_json::to_str("\"x\\u0041\\\\y\""), "xA\\y")
+    test::assert_eq(lsp_json::to_str("\"\\ud83d\\ude00\""), "😀")
+end
+
+#[test]
+fn json_missing_paths_are_safe() is
+    test::assert_eq(lsp_json::get(sample(), "params.nope"), "")
+    test::assert_eq(lsp_json::get_int(sample(), "nope"), 0)
+    test::assert_false(lsp_json::has(sample(), "params.items.9"))
+    test::assert_true(lsp_json::has(sample(), "params.nil"))
+    test::assert_false(lsp_json::get_bool(sample(), "params.nil"))
+    test::assert_true(lsp_json::get_bool(sample(), "params.ok"))
+end
+
+#[test]
+fn json_kind_count_items_keys() is
+    test::assert_eq(lsp_json::kind("[1]"), "array")
+    test::assert_eq(lsp_json::kind("{\"a\":1}"), "object")
+    test::assert_eq(lsp_json::kind("\"s\""), "string")
+    test::assert_eq(lsp_json::kind("-3"), "number")
+    test::assert_eq(lsp_json::kind("null"), "null")
+    test::assert_eq(lsp_json::count(lsp_json::get(sample(), "params.items")), 2)
+    test::assert_eq(lsp_json::count(sample()), 3)
+    test::assert_eq(iter_join(lsp_json::keys(sample()), ","), "id,method,params")
+    test::assert_eq(lsp_json::item("[10,20,30]", 2), "30")
+end
+
+#[test]
+fn json_valid_detects_garbage() is
+    test::assert_true(lsp_json::valid(sample()))
+    test::assert_false(lsp_json::valid("{\"a\":"))
+    test::assert_false(lsp_json::valid(""))
+    test::assert_false(lsp_json::valid("{} {}"))
+end
+
+#[test]
+fn json_quote_roundtrip() is
+    let s: string = "a\"b\\c\nd\te\x01"
+    test::assert_eq(lsp_json::to_str(lsp_json::quote(s)), s)
+    test::assert_eq(lsp_json::quote("x"), "\"x\"")
+end
+
+#[test]
+fn json_builders() is
+    let mut o: string = lsp_json::empty_object()
+    o = lsp_json::put_str(o, "a", "x")
+    o = lsp_json::put_int(o, "n", 1)
+    o = lsp_json::put_int(o, "n", 2)
+    o = lsp_json::put_bool(o, "b", false)
+    test::assert_eq(o, "{\"a\":\"x\",\"n\":2,\"b\":false}")
+    test::assert_eq(lsp_json::append("[]", "1"), "[1]")
+    test::assert_eq(lsp_json::append("[1]", "2"), "[1,2]")
+    test::assert_eq(lsp_json::array_of_strings(["a", "b"]), "[\"a\",\"b\"]")
+    test::assert_eq(lsp_json::array_of_ints([1, 2]), "[1,2]")
+    test::assert_eq(lsp_json::object_of(["k"], ["1"]), "{\"k\":1}")
+end
+
+;; ── Tekst ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn text_incremental_edits() is
+    let ls: [string] = lsp_text::split_lines("hello world\nsecond\nthird")
+    test::assert_eq(lsp_text::join_lines(lsp_text::apply_edit(ls, 0, 6, 0, 11, "there", 16)), "hello there\nsecond\nthird")
+    test::assert_eq(lsp_text::join_lines(lsp_text::apply_edit(ls, 0, 6, 1, 3, "X\nY", 16)), "hello X\nYond\nthird")
+    test::assert_eq(lsp_text::join_lines(lsp_text::apply_edit(ls, 2, 5, 2, 5, "!\nend", 16)), "hello world\nsecond\nthird!\nend")
+    test::assert_eq(lsp_text::join_lines(lsp_text::apply_edit(ls, 0, 0, 99, 0, "all", 16)), "all")
+end
+
+#[test]
+fn text_offsets() is
+    let ls: [string] = lsp_text::split_lines("ab\ncde\nf")
+    test::assert_eq(lsp_text::offset_at(ls, 1, 2, 16), 5)
+    test::assert_eq(lsp_text::line_of_offset(ls, 4), 1)
+    test::assert_eq(lsp_text::col_of_offset(ls, 4, 16), 1)
+end
+
+#[test]
+fn text_words() is
+    test::assert_eq(lsp_text::word_at("let foo_bar = 1", 6), "foo_bar")
+    test::assert_eq(lsp_text::word_at("let foo_bar = 1", 3), "let")
+    test::assert_eq(lsp_text::word_at("a  b", 2), "")
+    test::assert_eq(lsp_text::word_start("let foo", 6), 4)
+end
+
+#[test]
+fn text_uri_conversion() is
+    test::assert_eq(lsp_text::uri_to_path("file:///home/u/a%20b.hs"), "/home/u/a b.hs")
+    test::assert_eq(lsp_text::path_to_uri("/home/u/a b.hs"), "file:///home/u/a%20b.hs")
+    test::assert_eq(lsp_text::uri_to_path("file:///C:/proj/x.hs"), "C:/proj/x.hs")
+    test::assert_eq(lsp_text::uri_to_path("untitled:1"), "untitled:1")
+end
+
+;; ── Protokol ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn proto_builders_produce_valid_json() is
+    let rng: string = lsp_proto::range(1, 2, 3, 4)
+    test::assert_eq(lsp_json::get_int(rng, "end.character"), 4)
+    let d: string = lsp_proto::diagnostic_code(rng, LSP_SEV_ERROR, "E1", "src", "bad \"x\"")
+    test::assert_true(lsp_json::valid(d))
+    test::assert_eq(lsp_json::get_str(d, "message"), "bad \"x\"")
+    test::assert_eq(lsp_json::get_str(d, "code"), "E1")
+    let we: string = lsp_proto::workspace_edit("file:///a", [lsp_proto::text_edit(rng, "z")])
+    test::assert_true(lsp_json::valid(we))
+    test::assert_eq(lsp_json::get_str(we, "changes.file:///a.0.newText"), "z")
+    let ci: string = lsp_proto::completion_insert("fn", LSP_KIND_SNIPPET, "d", "fn $1", true)
+    test::assert_eq(lsp_json::get_int(ci, "insertTextFormat"), 2)
+    test::assert_true(lsp_json::valid(lsp_proto::completion_list([ci], false)))
+    test::assert_true(lsp_json::valid(lsp_proto::semantic_tokens_options(["a"], ["b"])))
+end
+
+;; ── RPC ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn rpc_messages() is
+    let r: string = lsp_rpc::response("3", "{\"ok\":true}")
+    test::assert_true(lsp_json::valid(r))
+    test::assert_true(lsp_rpc::is_response(r))
+    let e: string = lsp_rpc::error_response("", LSP_ERR_PARSE, "bad")
+    test::assert_eq(lsp_json::get(e, "id"), "null")
+    test::assert_eq(lsp_json::get_int(e, "error.code"), -32700)
+    let n: string = lsp_rpc::notification("x/y", "{}")
+    test::assert_true(lsp_rpc::is_notification(n))
+    let q: string = lsp_rpc::request("9", "x/z", "[]")
+    test::assert_true(lsp_rpc::is_request(q))
+    test::assert_eq(lsp_rpc::msg_method(q), "x/z")
+end
+
+;; ── Dokumenty ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn docs_open_change_close() is
+    let mut st: lsp_docs::Store = lsp_docs::new_store()
+    st = lsp_docs::open(st, "file:///a", "hs", 1, "one\ntwo")
+    st = lsp_docs::open(st, "file:///b", "hs", 1, "bb")
+    test::assert_eq(lsp_docs::count(st), 2)
+    st = lsp_docs::apply_changes(st, "file:///a", 2, "[{\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":3}},\"text\":\"TWO\"}]", 16)
+    test::assert_eq(lsp_docs::text(st, "file:///a"), "one\nTWO")
+    test::assert_eq(lsp_docs::version(st, "file:///a"), 2)
+    st = lsp_docs::apply_changes(st, "file:///b", 5, "[{\"text\":\"whole\"}]", 16)
+    test::assert_eq(lsp_docs::text(st, "file:///b"), "whole")
+    st = lsp_docs::close(st, "file:///a")
+    test::assert_false(lsp_docs::is_open(st, "file:///a"))
+    test::assert_eq(lsp_docs::line(st, "file:///b", 0), "whole")
+end
